@@ -28,10 +28,22 @@
   #wait img { width: 96px; height: 96px; border-radius: 22px; animation: pulse 1.4s ease-in-out infinite; }
   #wait.gone { opacity: 0; pointer-events: none; }
   @keyframes pulse { 50% { opacity: .55; transform: scale(.94); } }
+  /* Live QR scanner, opened by the app inside the frame. */
+  #scan { position: fixed; inset: 0; background: #000; z-index: 10; display: none; }
+  #scan.on { display: block; }
+  #scan video { width: 100%; height: 100%; object-fit: cover; }
+  #scan .box { position: absolute; left: 50%; top: 45%; width: 64vmin; height: 64vmin; transform: translate(-50%, -50%);
+    border: 4px solid #fff; border-radius: 22px; box-shadow: 0 0 0 100vmax rgba(0,0,0,.45); }
+  #scan .msg { position: absolute; left: 0; right: 0; top: calc(45% + 36vmin); text-align: center; color: #fff;
+    font: 600 18px/1.3 -apple-system, system-ui, sans-serif; }
+  #scan .x { position: absolute; right: 18px; top: calc(18px + env(safe-area-inset-top)); width: 52px; height: 52px; border-radius: 50%;
+    border: 0; background: rgba(255,255,255,.2); color: #fff; font-size: 28px; line-height: 52px; }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
 </head>
 <body>
 <div id="wait"><img src="apple-touch-icon.png" alt="Equipment Desk"></div>
+<div id="scan"><video playsinline muted></video><div class="box"></div><div class="msg">Point at the QR label</div><button class="x" aria-label="Close">×</button></div>
 <script>
   var APP = {
     real: 'https://script.google.com/macros/s/AKfycbyku5YA5pRPny7O0rXcvXuZmQ5T8JxDcSx-CTHrXLaQ-hgfu1Xxhz6UCxUnOP-BqQq6/exec',
@@ -40,9 +52,56 @@
   var f = document.createElement('iframe');
   f.src = /[?&]test\b/.test(location.search) ? APP.test : APP.real;
   f.title = 'Equipment Desk';
-  f.allow = 'camera; clipboard-write';
+  f.allow = 'clipboard-write';
   f.onload = function () { document.getElementById('wait').className = 'gone'; };
   document.body.appendChild(f);
+
+  // Live scanner. Apps Script may not use the camera, but this page may: the app asks
+  // for a scan, the camera reads frame after frame until a QR is found, and the code
+  // goes back to the app. Messages are accepted only from the app's Google frame.
+  var scan = document.getElementById('scan'), video = scan.querySelector('video');
+  var asker = null, stream = null, timer = null, canvas = document.createElement('canvas');
+  var ctx = canvas.getContext('2d', { willReadFrequently: true });
+  var detector = ('BarcodeDetector' in window) ? new BarcodeDetector({ formats: ['qr_code'] }) : null;
+  function fromApp(e) { return /\.googleusercontent\.com$/.test(new URL(e.origin).hostname); }
+  function stop() {
+    clearTimeout(timer); timer = null;
+    if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+    stream = null; scan.className = '';
+  }
+  function send(msg) { try { asker.postMessage(msg, '*'); } catch (err) {} }
+  async function tick() {
+    if (!stream) return;
+    var w = video.videoWidth, h = video.videoHeight;
+    if (w && h) {
+      // The square in the middle, where the label is held, read at two sizes.
+      var side = Math.min(w, h) * 0.8, sx = (w - side) / 2, sy = (h - side) / 2.2;
+      for (var i = 0, sizes = [640, 400]; i < sizes.length; i++) {
+        canvas.width = canvas.height = sizes[i];
+        ctx.drawImage(video, sx, sy, side, side, 0, 0, sizes[i], sizes[i]);
+        var code = null;
+        if (detector) { try { var r = await detector.detect(canvas); if (r[0]) code = r[0].rawValue; } catch (err) {} }
+        if (!code && window.jsQR) { var q = jsQR(ctx.getImageData(0, 0, sizes[i], sizes[i]).data, sizes[i], sizes[i], { inversionAttempts: 'attemptBoth' }); if (q) code = q.data; }
+        if (code) { try { navigator.vibrate && navigator.vibrate(60); } catch (err) {} stop(); send({ eq: 'code', code: code }); return; }
+      }
+    }
+    timer = setTimeout(tick, 90);
+  }
+  async function start() {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+    } catch (err) { stream = null; send({ eq: 'nocamera', why: String(err && err.name || err) }); return; }
+    video.srcObject = stream; scan.className = 'on';
+    try { await video.play(); } catch (err) {}
+    tick();
+  }
+  scan.querySelector('.x').onclick = function () { stop(); send({ eq: 'cancel' }); };
+  window.addEventListener('message', function (e) {
+    if (!e.data || !e.data.eq || !fromApp(e)) return;
+    asker = e.source;
+    if (e.data.eq === 'hello') send({ eq: 'door', v: 1 });
+    if (e.data.eq === 'scan' && !stream) start();
+  });
 </script>
 </body>
 </html>
